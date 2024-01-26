@@ -1,165 +1,98 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { io } from "socket.io-client";
-import {
-  Text,
-  View,
-  StatusBar,
-  SafeAreaView,
-  StyleSheet,
-  TextInput,
-  Button,
-  TouchableOpacity,
-} from "react-native";
-// import TicTacToe from "./TicTacToeBoard";
+import express from 'express';
+import { Server } from 'socket.io';
+import { createServer } from 'http';
+import cors from 'cors';
 
+const port = 3000;
+const app = express();
+const server = createServer(app);
+const games = {};
 
-export default function App() {
-  const socket = useMemo(() => io("http://192.168.137.1:3000"), []);
-
-  const [message, setMessage] = useState("");
-  const [room, setRoom] = useState("");
-  const [socketId, setSocketId] = useState("");
-  const [messages, setMessages] = useState([]);
-  const [roomname, setRoomname] = useState("");
-  const [game, setGame] = useState({ board: Array(9).fill(null), players: [], currentPlayer: '' });
-
-
-  const createGameHandler = () => {
-    socket.emit('create-game', room);
-    setRoom('');
-  };
-
-
-  const makeMoveHandler = (index) => {
-    socket.emit('make-move', { room, index });
-  };
-
-  
-  const renderBoard = () => {
-    return (
-      <View style={styles.board}>
-        {game.board.map((value, index) => (
-          <TouchableOpacity
-            key={index}
-            style={styles.cell}
-            onPress={() => makeMoveHandler(index)}
-          >
-            <Text style={styles.cellText}>{value}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    );
-  };
-
-
-
-  const handleSubmit = () => {
-    socket.emit("message",{message, room});
-    setMessage("");
-  };
-
-  const joinRoomHandler = () => {
-    socket.emit("join-room",roomname);
-    socket.emit('join-game', roomname);
-    setRoomname("");
+const io = new Server(server, {
+  cors: {
+    origin: 'http://localhost:5173',
+    methods: ['GET', 'POST'],
+    credentials: true,
   }
+});
 
+app.use(cors());
+app.get('/', (req, res) => {
+  res.send('Hello World!');
+});
 
-  useEffect(() => {
-    socket.on("connect", () => {
-      setSocketId(socket.id);
-      console.log(socket.id); // x8WIv7-mJelg7on_ALbx
-    });
+io.on('connection', (socket) => {
+  console.log('a user connected');
+  console.log("ID:", socket.id);
 
-    socket.on('game-state', (data) => {
-      console.log('Received game state:', data);
-      setGame(data);
-    });
+  socket.on("message", ({ room, message }) => {
+    console.log(room, message);
+    socket.to(room).emit("receive-message", message);
+  });
 
-    socket.on('game-over', (data) => {
-      console.log('Game over! Winner:', data.winner);
-    });
+  socket.on("join-room", (room) => {
+    console.log("Joined room", room);
+    socket.join(room);
+  });
 
+  socket.on('create-game', (room) => {
+    console.log('Created game in room', room);
+    socket.join(room);
+    games[room] = { board: Array(9).fill(null), players: [socket.id], currentPlayer: socket.id };
+    io.to(room).emit('game-state', games[room]);
+  });
 
-    socket.on("receive-message", (data) => {
-      console.log(data);
-      setMessages([...messages, data]);
-    });
-    socket.on("welcome", (s) => {
-      console.log(s);
-    });
-    return () => {
-      socket.disconnect();
-    };
-  }, []);
+  socket.on('join-game', (room) => {
+    console.log('Joined game in room', room);
+    socket.join(room);
+    if (games[room] && games[room].players.length === 1) {
+      games[room].players.push(socket.id);
+      io.to(room).emit('game-state', games[room]);
+    }
+  });
 
+  socket.on('make-move', ({ room, index }) => {
+    const game = games[room];
+  
+    if (game && game.currentPlayer === socket.id && !game.board[index]) {
+      const currentPlayerSymbol = (game.currentPlayer === game.players[0]) ? "X" : "O";
+  
+      // Gán giá trị cho ô đó trên bảng là 'X' hoặc 'O', tùy thuộc vào người chơi hiện tại
+      game.board[index] = currentPlayerSymbol;
+  
+      // Chuyển lượt chơi cho người chơi kế tiếp
+      game.currentPlayer = (game.players[0] === socket.id) ? game.players[1] : game.players[0];
+  
+      // Gửi trạng thái mới của trò chơi đến tất cả các máy khách trong phòng
+      io.to(room).emit('game-state', game);
+  
+      // Kiểm tra nếu người chơi đã chiến thắng
+      if (checkWinner(game.board, currentPlayerSymbol)) {
+        io.to(room).emit('game-over', { winner: socket.id });
+      }
+    }
 
+  });
+  
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar />
-      <Text style={styles.text}>Socket ID: {socketId}</Text>
-      <TextInput
-        style={styles.inputStyle}
-        value={message}
-        placeholder="Message"
-        onChangeText={(text) => setMessage(text)}
-      />
-      <TextInput
-        style={styles.inputStyle}
-        value={room}
-        placeholder="Room Name"
-        onChangeText={(text) => setRoom(text)}
+  socket.on('disconnect', () => {
+    console.log('user disconnected', socket.id);
+  });
+});
 
-      />
-      <Button title="Send" onPress={handleSubmit} />
-      <TextInput
-        style={styles.inputStyle}
-        value={roomname}
-        placeholder="Room"
-        onChangeText={(text) => setRoomname(text)}
-      />
-      <Button title="Create/Join Room" onPress={joinRoomHandler} />
-      <Text style={styles.text}>Messages</Text>
-      {messages.map((m, index) => (
-        <Text key={index}>{m}</Text>
-      ))}
+function checkWinner(board, player) {
+  const winningCombinations = [
+    [0, 1, 2], [3, 4, 5], [6, 7, 8],
+    [0, 3, 6], [1, 4, 7], [2, 5, 8],
+    [0, 4, 8], [2, 4, 6],
+  ];
 
-      {/* <Button title="Create Game" onPress={createGameHandler} />
-      {renderBoard()} */}
-      
-    </SafeAreaView>
-  );
+  return winningCombinations.some(combination => {
+    const [a, b, c] = combination;
+    return board[a] === player && board[b] === player && board[c] === player;
+  });
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 24,
-  },
-  text: {
-    fontSize: 24,
-    fontWeight: "bold",
-    marginVertical : 10,
-  },
-  inputStyle: {
-    height: 42,
-    borderWidth: 1,
-    borderRadius: 6,
-  },
-  board: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 20,
-  },
-  cell: {
-    width: 100,
-    height: 100,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cellText: {
-    fontSize: 48,
-  },
+server.listen(port, () => {
+  console.log(`Example app listening at http://localhost:${port}`);
 });
